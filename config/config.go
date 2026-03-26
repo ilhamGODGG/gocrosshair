@@ -18,18 +18,32 @@ import (
 // Config represents the complete application configuration.
 type Config struct {
 	Crosshair CrosshairConfig `toml:"crosshair"`
+	Dynamic   DynamicConfig   `toml:"dynamic"`
 	Position  PositionConfig  `toml:"position"`
 }
 
 // CrosshairConfig contains crosshair appearance settings.
 type CrosshairConfig struct {
-	Shape            string `toml:"shape"`
-	Color            string `toml:"color"`
-	Size             int    `toml:"size"`
-	Thickness        int    `toml:"thickness"`
-	Gap              int    `toml:"gap"`
-	OutlineThickness int    `toml:"outline_thickness"`
-	OutlineColor     string `toml:"outline_color"`
+	Shape            string  `toml:"shape"`
+	Color            string  `toml:"color"`
+	InvertedColor    bool    `toml:"inverted_color"`
+	Opacity          float64 `toml:"opacity"`
+	Size             int     `toml:"size"`
+	Thickness        int     `toml:"thickness"`
+	Gap              int     `toml:"gap"`
+	OutlineThickness int     `toml:"outline_thickness"`
+	OutlineColor     string  `toml:"outline_color"`
+}
+
+// DynamicConfig contains dynamic crosshair resizing settings.
+type DynamicConfig struct {
+	Enabled         bool    `toml:"enabled"`
+	WhileMove       bool    `toml:"while_move"`
+	WhileScoped     bool    `toml:"while_scoped"`
+	WalkingSize     int     `toml:"walking_size"`
+	SprintSize      int     `toml:"sprint_size"`
+	ScopeSize       int     `toml:"scope_size"`
+	TransitionSpeed float64 `toml:"transition_speed"`
 }
 
 // PositionConfig contains crosshair positioning settings.
@@ -144,6 +158,10 @@ func (c *Config) Validate() error {
 		errs = append(errs, fmt.Sprintf("invalid outline_color %q: %v", c.Crosshair.OutlineColor, err))
 	}
 
+	if c.Crosshair.Opacity < 0.0 || c.Crosshair.Opacity > 1.0 {
+		errs = append(errs, fmt.Sprintf("opacity must be between 0.0 and 1.0 (got %.2f)", c.Crosshair.Opacity))
+	}
+
 	if c.Crosshair.Size < 1 || c.Crosshair.Size > 500 {
 		errs = append(errs, fmt.Sprintf("size must be between 1 and 500 (got %d)", c.Crosshair.Size))
 	}
@@ -162,6 +180,20 @@ func (c *Config) Validate() error {
 
 	if c.Position.Monitor < -1 || c.Position.Monitor > 100 {
 		errs = append(errs, fmt.Sprintf("monitor must be between -1 and 100 (got %d)", c.Position.Monitor))
+	}
+
+	// Validate dynamic config
+	if c.Dynamic.WalkingSize < 1 || c.Dynamic.WalkingSize > 500 {
+		errs = append(errs, fmt.Sprintf("walking_size must be between 1 and 500 (got %d)", c.Dynamic.WalkingSize))
+	}
+	if c.Dynamic.SprintSize < 1 || c.Dynamic.SprintSize > 500 {
+		errs = append(errs, fmt.Sprintf("sprint_size must be between 1 and 500 (got %d)", c.Dynamic.SprintSize))
+	}
+	if c.Dynamic.ScopeSize < 1 || c.Dynamic.ScopeSize > 500 {
+		errs = append(errs, fmt.Sprintf("scope_size must be between 1 and 500 (got %d)", c.Dynamic.ScopeSize))
+	}
+	if c.Dynamic.TransitionSpeed < 0.0 || c.Dynamic.TransitionSpeed > 1.0 {
+		errs = append(errs, fmt.Sprintf("transition_speed must be between 0.0 and 1.0 (got %.2f)", c.Dynamic.TransitionSpeed))
 	}
 
 	if len(errs) > 0 {
