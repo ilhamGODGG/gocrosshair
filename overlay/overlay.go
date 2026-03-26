@@ -3,6 +3,8 @@ package overlay
 import (
 	"fmt"
 	"log"
+	"math"
+	"time"
 
 	"github.com/jezek/xgb"
 	"github.com/jezek/xgb/shape"
@@ -22,6 +24,11 @@ type Overlay struct {
 	monitor   Monitor
 	centerX   int16
 	centerY   int16
+	visible   bool
+
+	// Dynamic resizing state
+	dynamic     *DynamicSizer
+	currentSize int
 }
 
 // NewOverlay creates a new crosshair overlay connected to the X server.
@@ -58,18 +65,30 @@ func NewOverlay(cfg *config.Config) (*Overlay, error) {
 	centerX := monitor.CenterX() + int16(cfg.Position.OffsetX)
 	centerY := monitor.CenterY() + int16(cfg.Position.OffsetY)
 
-	return &Overlay{
-		conn:    conn,
-		screen:  screen,
-		config:  cfg,
-		monitor: monitor,
-		centerX: centerX,
-		centerY: centerY,
-	}, nil
+	o := &Overlay{
+		conn:        conn,
+		screen:      screen,
+		config:      cfg,
+		monitor:     monitor,
+		centerX:     centerX,
+		centerY:     centerY,
+		visible:     true,
+		currentSize: cfg.Crosshair.Size,
+	}
+
+	// Initialize dynamic sizer if enabled
+	if cfg.Dynamic.Enabled {
+		o.dynamic = NewDynamicSizer(conn, screen, cfg)
+	}
+
+	return o, nil
 }
 
 // Close releases X server resources and closes the connection.
 func (o *Overlay) Close() {
+	if o.dynamic != nil {
+		o.dynamic.Stop()
+	}
 	if o.conn != nil {
 		o.conn.Close()
 	}
@@ -132,6 +151,11 @@ func (o *Overlay) createGraphicsContext() error {
 	mask := uint32(xproto.GcForeground)
 	values := []uint32{color}
 
+	if o.config.Crosshair.InvertedColor {
+		mask = uint32(xproto.GcFunction | xproto.GcForeground)
+		values = []uint32{xproto.GxXor, color}
+	}
+
 	if err := xproto.CreateGCChecked(o.conn, o.gcID, xproto.Drawable(o.windowID), mask, values).Check(); err != nil {
 		return fmt.Errorf("failed to create GC: %w", err)
 	}
@@ -144,7 +168,11 @@ func (o *Overlay) createGraphicsContext() error {
 		o.outlineGC = outlineGC
 
 		outlineColor := o.config.GetOutlineColorUint32()
-		if err := xproto.CreateGCChecked(o.conn, o.outlineGC, xproto.Drawable(o.windowID), mask, []uint32{outlineColor}).Check(); err != nil {
+		// FIX: Outline should always use normal foreground drawing,
+		// never XOR mode, regardless of the inverted_color setting.
+		outlineMask := uint32(xproto.GcForeground)
+		outlineValues := []uint32{outlineColor}
+		if err := xproto.CreateGCChecked(o.conn, o.outlineGC, xproto.Drawable(o.windowID), outlineMask, outlineValues).Check(); err != nil {
 			return fmt.Errorf("failed to create outline GC: %w", err)
 		}
 	}
@@ -152,15 +180,64 @@ func (o *Overlay) createGraphicsContext() error {
 	return nil
 }
 
-// applyShape configures the window shape for transparency and click-through.
-func (o *Overlay) applyShape() error {
+// setOpacity sets the window opacity using the _NET_WM_WINDOW_OPACITY property.
+// Requires a compositor (e.g., picom, compton, xcompmgr) to have visible effect.
+func (o *Overlay) setOpacity() error {
+	opacity := o.config.Crosshair.Opacity
+	if opacity <= 0 || opacity >= 1.0 {
+		// No need to set property; 1.0 is the default and 0.0 would be invisible
+		return nil
+	}
+
+	// The _NET_WM_WINDOW_OPACITY property uses a uint32 where
+	// 0xFFFFFFFF = fully opaque and 0x00000000 = fully transparent
+	opacityValue := uint32(math.Round(opacity * float64(0xFFFFFFFF)))
+
+	atomName := "_NET_WM_WINDOW_OPACITY"
+	atomReply, err := xproto.InternAtom(o.conn, false, uint16(len(atomName)), atomName).Reply()
+	if err != nil {
+		return fmt.Errorf("failed to intern _NET_WM_WINDOW_OPACITY atom: %w", err)
+	}
+
+	cardinalReply, err := xproto.InternAtom(o.conn, false, 8, "CARDINAL").Reply()
+	if err != nil {
+		return fmt.Errorf("failed to intern CARDINAL atom: %w", err)
+	}
+
+	// Pack the uint32 as little-endian bytes
+	data := []byte{
+		byte(opacityValue),
+		byte(opacityValue >> 8),
+		byte(opacityValue >> 16),
+		byte(opacityValue >> 24),
+	}
+
+	err = xproto.ChangePropertyChecked(
+		o.conn,
+		xproto.PropModeReplace,
+		o.windowID,
+		atomReply.Atom,
+		cardinalReply.Atom,
+		32, // format: 32-bit
+		1,  // data length in units of format size
+		data,
+	).Check()
+	if err != nil {
+		return fmt.Errorf("failed to set opacity: %w", err)
+	}
+
+	return nil
+}
+
+// applyShapeWithSize configures the window shape for the given size.
+func (o *Overlay) applyShapeWithSize(size int) error {
 	cfg := o.config.Crosshair
 
 	shapeRects := GenerateShape(
 		cfg.Shape,
 		o.centerX,
 		o.centerY,
-		int16(cfg.Size),
+		int16(size),
 		int16(cfg.Thickness),
 		int16(cfg.Gap),
 	)
@@ -203,15 +280,20 @@ func (o *Overlay) applyShape() error {
 	return nil
 }
 
-// drawCrosshair renders the crosshair onto the window.
-func (o *Overlay) drawCrosshair() error {
+// applyShape configures the window shape using the base config size.
+func (o *Overlay) applyShape() error {
+	return o.applyShapeWithSize(o.currentSize)
+}
+
+// drawCrosshairWithSize renders the crosshair onto the window at the given size.
+func (o *Overlay) drawCrosshairWithSize(size int) error {
 	cfg := o.config.Crosshair
 
 	shapeRects := GenerateShape(
 		cfg.Shape,
 		o.centerX,
 		o.centerY,
-		int16(cfg.Size),
+		int16(size),
 		int16(cfg.Thickness),
 		int16(cfg.Gap),
 	)
@@ -234,6 +316,56 @@ func (o *Overlay) drawCrosshair() error {
 	return nil
 }
 
+// drawCrosshair renders the crosshair onto the window.
+func (o *Overlay) drawCrosshair() error {
+	return o.drawCrosshairWithSize(o.currentSize)
+}
+
+// redrawWithSize clears the window and redraws the crosshair at a new size.
+func (o *Overlay) redrawWithSize(size int) {
+	o.currentSize = size
+
+	// Clear the window
+	xproto.ClearArea(o.conn, true, o.windowID, 0, 0, 0, 0)
+
+	// Reapply shape mask for new size
+	if err := o.applyShapeWithSize(size); err != nil {
+		log.Printf("Warning: failed to reapply shape: %v", err)
+	}
+
+	// Redraw crosshair
+	if err := o.drawCrosshairWithSize(size); err != nil {
+		log.Printf("Warning: failed to redraw crosshair: %v", err)
+	}
+}
+
+// getKeysymKeycode queries the X server for the keycode of a given keysym.
+func getKeysymKeycode(conn *xgb.Conn, screen *xproto.ScreenInfo, targetSym xproto.Keysym) xproto.Keycode {
+	setup := xproto.Setup(conn)
+	count := byte(int(setup.MaxKeycode) - int(setup.MinKeycode) + 1)
+	mapping, err := xproto.GetKeyboardMapping(conn, setup.MinKeycode, count).Reply()
+	if err != nil {
+		return 0
+	}
+
+	for i := 0; i < len(mapping.Keysyms); i++ {
+		if mapping.Keysyms[i] == targetSym {
+			return xproto.Keycode(int(setup.MinKeycode) + (i / int(mapping.KeysymsPerKeycode)))
+		}
+	}
+	return 0
+}
+
+// toggleVisibility toggles the visibility of the crosshair window.
+func (o *Overlay) toggleVisibility() {
+	o.visible = !o.visible
+	if o.visible {
+		xproto.MapWindowChecked(o.conn, o.windowID).Check()
+	} else {
+		xproto.UnmapWindowChecked(o.conn, o.windowID).Check()
+	}
+}
+
 // Run initializes and runs the overlay event loop.
 func (o *Overlay) Run() error {
 	if err := o.createWindow(); err != nil {
@@ -248,6 +380,11 @@ func (o *Overlay) Run() error {
 		return err
 	}
 
+	// Set opacity before mapping the window
+	if err := o.setOpacity(); err != nil {
+		log.Printf("Warning: failed to set opacity: %v", err)
+	}
+
 	if err := xproto.MapWindowChecked(o.conn, o.windowID).Check(); err != nil {
 		return fmt.Errorf("failed to map window: %w", err)
 	}
@@ -256,8 +393,31 @@ func (o *Overlay) Run() error {
 		return err
 	}
 
+	// Grab Ctrl+Shift+H hotkey
+	const keysymH = 0x0068 // lowercase h
+	keycode := getKeysymKeycode(o.conn, o.screen, keysymH)
+	if keycode != 0 {
+		modifiers := []uint16{
+			xproto.ModMaskControl | xproto.ModMaskShift,
+			xproto.ModMaskControl | xproto.ModMaskShift | xproto.ModMaskLock,
+			xproto.ModMaskControl | xproto.ModMaskShift | xproto.ModMask2,
+			xproto.ModMaskControl | xproto.ModMaskShift | xproto.ModMaskLock | xproto.ModMask2,
+		}
+		for _, mod := range modifiers {
+			xproto.GrabKeyChecked(o.conn, false, o.screen.Root, mod, keycode, xproto.GrabModeAsync, xproto.GrabModeAsync).Check()
+		}
+	} else {
+		log.Println("Warning: Could not find keycode for hotkey (H)")
+	}
+
 	log.Printf("Crosshair overlay running on monitor %q at (%d, %d). Press Ctrl+C to exit.",
 		o.monitor.Name, o.centerX, o.centerY)
+
+	// Start dynamic resizing goroutine if enabled
+	if o.dynamic != nil {
+		o.dynamic.Start()
+		go o.dynamicResizeLoop()
+	}
 
 	for {
 		ev, err := o.conn.WaitForEvent()
@@ -269,11 +429,34 @@ func (o *Overlay) Run() error {
 			return nil
 		}
 
-		switch ev.(type) {
+		switch ev := ev.(type) {
 		case xproto.ExposeEvent:
-			if err := o.drawCrosshair(); err != nil {
-				log.Printf("Warning: failed to redraw crosshair: %v", err)
+			if o.visible {
+				if err := o.drawCrosshair(); err != nil {
+					log.Printf("Warning: failed to redraw crosshair: %v", err)
+				}
 			}
+		case xproto.KeyPressEvent:
+			if ev.Detail == keycode {
+				o.toggleVisibility()
+			}
+		}
+	}
+}
+
+// dynamicResizeLoop runs at ~60fps and updates crosshair size based on input state.
+func (o *Overlay) dynamicResizeLoop() {
+	ticker := time.NewTicker(16 * time.Millisecond) // ~60fps
+	defer ticker.Stop()
+
+	for range ticker.C {
+		if o.dynamic == nil {
+			return
+		}
+
+		newSize := o.dynamic.CurrentSize()
+		if newSize != o.currentSize && o.visible {
+			o.redrawWithSize(newSize)
 		}
 	}
 }
