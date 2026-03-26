@@ -46,11 +46,14 @@ type step int
 const (
 	stepShape step = iota
 	stepColor
+	stepInvertedColor
+	stepOpacity
 	stepSize
 	stepThickness
 	stepGap
 	stepOutline
 	stepOutlineColor
+	stepDynamic
 	stepMonitor
 	stepOffsetX
 	stepOffsetY
@@ -82,7 +85,7 @@ type Model struct {
 	width, height  int
 }
 
-var shapeOptions = []string{"cross", "dot", "circle", "cross-dot"}
+var shapeOptions = []string{"cross", "dot", "circle", "cross-dot", "caret"}
 
 var colorPresets = []struct {
 	name  string
@@ -197,8 +200,14 @@ func (m Model) View() string {
 	case stepColor:
 		b.WriteString(m.renderColorSelect())
 
+	case stepInvertedColor:
+		b.WriteString(m.renderSelect("Use inverted color (XOR blending)?", []string{"No", "Yes"}))
+
+	case stepOpacity:
+		b.WriteString(m.renderNumberInput("Crosshair opacity (0.0-1.0, e.g. 0.8):", "0.8", 0, 1))
+
 	case stepSize:
-		b.WriteString(m.renderNumberInput("Crosshair size (pixels from center):", "10", 1, 100))
+		b.WriteString(m.renderNumberInput("Crosshair size (pixels from center):", "9", 1, 100))
 
 	case stepThickness:
 		b.WriteString(m.renderNumberInput("Line thickness (pixels):", "2", 1, 20))
@@ -211,6 +220,9 @@ func (m Model) View() string {
 
 	case stepOutlineColor:
 		b.WriteString(m.renderColorSelect())
+
+	case stepDynamic:
+		b.WriteString(m.renderSelect("Enable dynamic crosshair resizing?\n  (auto-resize based on movement/sprint/scope)", []string{"No", "Yes"}))
 
 	case stepMonitor:
 		b.WriteString(m.renderMonitorSelect())
@@ -341,6 +353,10 @@ func (m Model) renderConfirm() string {
 	cfg := m.config
 	b.WriteString(dimStyle.Render("  Shape:     ") + normalStyle.Render(cfg.Crosshair.Shape) + "\n")
 	b.WriteString(dimStyle.Render("  Color:     ") + normalStyle.Render(cfg.Crosshair.Color) + "\n")
+	if cfg.Crosshair.InvertedColor {
+		b.WriteString(dimStyle.Render("  Inverted:  ") + normalStyle.Render("Yes") + "\n")
+	}
+	b.WriteString(dimStyle.Render("  Opacity:   ") + normalStyle.Render(fmt.Sprintf("%.1f", cfg.Crosshair.Opacity)) + "\n")
 	b.WriteString(dimStyle.Render("  Size:      ") + normalStyle.Render(fmt.Sprintf("%d px", cfg.Crosshair.Size)) + "\n")
 	// Only show thickness and gap for cross/cross-dot shapes
 	if m.shapeNeedsThicknessAndGap() {
@@ -349,6 +365,12 @@ func (m Model) renderConfirm() string {
 	}
 	if cfg.Crosshair.OutlineThickness > 0 {
 		b.WriteString(dimStyle.Render("  Outline:   ") + normalStyle.Render(fmt.Sprintf("%d px (%s)", cfg.Crosshair.OutlineThickness, cfg.Crosshair.OutlineColor)) + "\n")
+	}
+	if cfg.Dynamic.Enabled {
+		b.WriteString(dimStyle.Render("  Dynamic:   ") + normalStyle.Render("Enabled") + "\n")
+		b.WriteString(dimStyle.Render("    Walk:    ") + normalStyle.Render(fmt.Sprintf("%d px", cfg.Dynamic.WalkingSize)) + "\n")
+		b.WriteString(dimStyle.Render("    Sprint:  ") + normalStyle.Render(fmt.Sprintf("%d px", cfg.Dynamic.SprintSize)) + "\n")
+		b.WriteString(dimStyle.Render("    Scope:   ") + normalStyle.Render(fmt.Sprintf("%d px", cfg.Dynamic.ScopeSize)) + "\n")
 	}
 	if cfg.Position.Monitor == -1 {
 		b.WriteString(dimStyle.Render("  Monitor:   ") + normalStyle.Render("Primary (auto)") + "\n")
@@ -399,7 +421,7 @@ func (m Model) maxCursor() int {
 		return len(shapeOptions) - 1
 	case stepColor, stepOutlineColor:
 		return len(colorPresets) - 1
-	case stepOutline:
+	case stepInvertedColor, stepOutline, stepDynamic:
 		return 1
 	case stepMonitor:
 		return len(m.monitors)
@@ -414,7 +436,7 @@ func (m Model) maxCursor() int {
 
 func (m Model) isTextInputStep() bool {
 	switch m.step {
-	case stepSize, stepThickness, stepGap, stepOffsetX, stepOffsetY:
+	case stepSize, stepThickness, stepGap, stepOpacity, stepOffsetX, stepOffsetY:
 		return true
 	case stepColor, stepOutlineColor:
 		return m.cursor == len(colorPresets)-1
@@ -426,7 +448,7 @@ func (m Model) isTextInputStep() bool {
 // shapeNeedsThicknessAndGap returns true if the current shape needs thickness and gap settings
 func (m Model) shapeNeedsThicknessAndGap() bool {
 	shape := m.config.Crosshair.Shape
-	return shape == "cross" || shape == "cross-dot"
+	return shape == "cross" || shape == "cross-dot" || shape == "caret"
 }
 
 func (m Model) handleEnter() (tea.Model, tea.Cmd) {
@@ -456,10 +478,27 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 		} else {
 			m.config.Crosshair.Color = colorPresets[m.cursor].value
 		}
-		m.step = stepSize
+		m.step = stepInvertedColor
 		m.cursor = 0
-		m.textInput.SetValue("10")
+		m.err = nil
+
+	case stepInvertedColor:
+		m.config.Crosshair.InvertedColor = (m.cursor == 1)
+		m.step = stepOpacity
+		m.cursor = 0
+		m.textInput.SetValue("0.8")
 		m.textInput.Focus()
+		m.err = nil
+
+	case stepOpacity:
+		val, err := strconv.ParseFloat(m.textInput.Value(), 64)
+		if err != nil || val < 0.0 || val > 1.0 {
+			m.err = fmt.Errorf("enter a number between 0.0 and 1.0")
+			return m, nil
+		}
+		m.config.Crosshair.Opacity = val
+		m.step = stepSize
+		m.textInput.SetValue("9")
 		m.err = nil
 
 	case stepSize:
@@ -506,7 +545,7 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 	case stepOutline:
 		if m.cursor == 0 {
 			m.config.Crosshair.OutlineThickness = 0
-			m.step = stepMonitor
+			m.step = stepDynamic
 		} else {
 			m.config.Crosshair.OutlineThickness = 1
 			m.step = stepOutlineColor
@@ -534,6 +573,12 @@ func (m Model) handleEnter() (tea.Model, tea.Cmd) {
 		} else {
 			m.config.Crosshair.OutlineColor = colorPresets[m.cursor].value
 		}
+		m.step = stepDynamic
+		m.cursor = 0
+		m.err = nil
+
+	case stepDynamic:
+		m.config.Dynamic.Enabled = (m.cursor == 1)
 		m.step = stepMonitor
 		m.cursor = 0
 		m.err = nil
