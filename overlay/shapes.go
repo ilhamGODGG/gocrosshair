@@ -193,6 +193,44 @@ func GenerateOutline(rects []xproto.Rectangle, outlineThickness int16) []xproto.
 	return outlineRects
 }
 
+// GenerateCaret creates rectangles for a ^ shape (caret).
+func GenerateCaret(centerX, centerY, size, thickness, gap int16) []xproto.Rectangle {
+	var rects []xproto.Rectangle
+
+	if thickness < 1 {
+		thickness = 1
+	}
+
+	// Height of the caret is equal to size.
+	// Y=0 is at the top of the screen. So centerY - gap is ABOVE the center.
+	for i := int16(0); i <= size; i++ {
+		y := centerY - gap + i
+
+		// The arms move outward by 1 pixel for each y to create a 45-degree angle.
+		xOffset := i
+
+		// Draw left arm segment
+		rects = append(rects, xproto.Rectangle{
+			X:      centerX - xOffset - (thickness / 2),
+			Y:      y,
+			Width:  uint16(thickness),
+			Height: 1,
+		})
+
+		// Draw right arm segment
+		if xOffset > 0 {
+			rects = append(rects, xproto.Rectangle{
+				X:      centerX + xOffset - (thickness / 2),
+				Y:      y,
+				Width:  uint16(thickness),
+				Height: 1,
+			})
+		}
+	}
+
+	return rects
+}
+
 // GenerateShape creates rectangles for the specified shape type.
 func GenerateShape(shape string, centerX, centerY, size, thickness, gap int16) []xproto.Rectangle {
 	switch shape {
@@ -205,6 +243,8 @@ func GenerateShape(shape string, centerX, centerY, size, thickness, gap int16) [
 	case "cross-dot":
 		dotSize := max(size/3, 2)
 		return GenerateCrossDot(centerX, centerY, size, thickness, gap, dotSize)
+	case "caret":
+		return GenerateCaret(centerX, centerY, size, thickness, gap)
 	default:
 		return GenerateCross(centerX, centerY, size, thickness, gap)
 	}
