@@ -78,7 +78,7 @@ gocrosshair -setup
 ```
 
 The wizard guides you through:
-- Crosshair shape selection (cross, dot, circle, cross-dot)
+- Crosshair shape selection (cross, dot, circle, cross-dot, caret)
 - Color selection with presets or custom hex colors
 - Size, thickness, and gap configuration
 - Outline options
@@ -128,7 +128,7 @@ The configuration file is located at `~/.config/gocrosshair/config.toml` (or `$X
 
 ```toml
 [crosshair]
-# Shape: "cross", "dot", "circle", "cross-dot"
+# Shape: "cross", "dot", "circle", "cross-dot", "caret"
 shape = "cross"
 
 # Color in hex format (#RRGGBB, 0xRRGGBB, or RRGGBB)
@@ -196,6 +196,16 @@ color = "#FFFFFF"
 size = 6
 ```
 
+#### Caret / Chevron
+```toml
+[crosshair]
+shape = "caret"
+color = "#00FFFF"
+size = 8
+thickness = 2
+gap = 0
+```
+
 #### Cross with Outline
 ```toml
 [crosshair]
@@ -229,7 +239,7 @@ If the configuration file is invalid, the application will prompt you:
 ╰───────────────────────────────────────────────────────────╯
 
 Problems found:
-  - invalid shape "invalid" (must be one of: cross, dot, circle, cross-dot)
+  - invalid shape "invalid" (must be one of: cross, dot, circle, cross-dot, caret)
 
 Options:
   [R] Reset to default configuration (backs up current file)
