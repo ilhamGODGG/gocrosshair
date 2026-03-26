@@ -37,7 +37,15 @@ func daemonize() bool {
 		return false
 	}
 
-	cmd := exec.Command(os.Args[0], os.Args[1:]...)
+	// Filter out the -setup flag so the background process doesn't try to run the wizard again
+	var args []string
+	for _, arg := range os.Args[1:] {
+		if arg != "-setup" && arg != "--setup" {
+			args = append(args, arg)
+		}
+	}
+
+	cmd := exec.Command(os.Args[0], args...)
 	cmd.Env = append(os.Environ(), daemonEnvVar+"=1")
 	cmd.Stdin = nil
 	cmd.Stdout = nil
